@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	. "github.com/nntaoli-project/GoEx"
 	"net/http"
 	"sort"
 	"strings"
 	"time"
+
+	. "github.com/nntaoli-project/goex"
 )
 
 type baseResp struct {
@@ -132,7 +133,7 @@ func (swap *CoinbeneSwap) GetFutureDepth(currencyPair CurrencyPair, contractType
 
 func (swap *CoinbeneSwap) GetFutureIndex(currencyPair CurrencyPair) (float64, error) { panic("") }
 
-func (swap *CoinbeneSwap) GetFutureUserinfo() (*FutureAccount, error) {
+func (swap *CoinbeneSwap) GetFutureUserinfo(currencyPair ...CurrencyPair) (*FutureAccount, error) {
 	var data struct {
 		AvailableBalance float64 `json:"availableBalance,string"`
 		FrozenBalance    float64 `json:"frozenBalance,string"`
@@ -189,6 +190,18 @@ func (swap *CoinbeneSwap) PlaceFutureOrder(currencyPair CurrencyPair, contractTy
 
 	json.Unmarshal(resp.Data, &data)
 	return data.orderId, nil
+}
+
+func (swap *CoinbeneSwap) LimitFuturesOrder(currencyPair CurrencyPair, contractType, price, amount string, openType int) (*FutureOrder, error) {
+	orderId, err := swap.PlaceFutureOrder(currencyPair, contractType, price, amount, openType, 0, 10)
+	return &FutureOrder{
+		Currency:     currencyPair,
+		OrderID2:     orderId,
+		Price:        ToFloat64(price),
+		Amount:       ToFloat64(amount),
+		OType:        openType,
+		ContractName: contractType,
+	}, err
 }
 
 func (swap *CoinbeneSwap) FutureCancelOrder(currencyPair CurrencyPair, contractType, orderId string) (bool, error) {

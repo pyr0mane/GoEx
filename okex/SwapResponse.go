@@ -11,7 +11,7 @@ type SwapPositionHolding struct {
 	LiquidationPrice float64 `json:"liquidation_price , string"`
 	Position         float64 `json:"position,string"`
 	AvailPosition    float64 `json:"avail_position,string"`
-	AvgCost          float64 `json:"avg_cost , string"`
+	AvgCost          float64 `json:"avg_cost,string"`
 	SettlementPrice  float64 `json:"settlement_price,string"`
 	InstrumentId     string  `json:"instrument_id"`
 	Leverage         string  `json:"leverage"`
@@ -168,6 +168,8 @@ type BaseTickerInfo struct {
 	High24h      float64 `json:"high_24h,string"`
 	Volume24h    float64 `json:"volume_24h,string"`
 	Low24h       float64 `json:"low_24h,string"`
+	BestBid      float64 `json:"best_bid,string"`
+	BestAsk      float64 `json:"best_ask,string"`
 }
 
 type SwapTickerList []BaseTickerInfo

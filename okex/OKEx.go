@@ -6,7 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"github.com/google/uuid"
-	. "github.com/nntaoli-project/GoEx"
+	. "github.com/nntaoli-project/goex"
+	"github.com/nntaoli-project/goex/internal/logger"
 	"strings"
 	"sync"
 	"time"
@@ -15,12 +16,14 @@ import (
 const baseUrl = "https://www.okex.com"
 
 type OKEx struct {
-	config     *APIConfig
-	OKExSpot   *OKExSpot
-	OKExFuture *OKExFuture
-	OKExSwap   *OKExSwap
-	OKExWallet *OKExWallet
-	OKExMargin *OKExMargin
+	config         *APIConfig
+	OKExSpot       *OKExSpot
+	OKExFuture     *OKExFuture
+	OKExSwap       *OKExSwap
+	OKExWallet     *OKExWallet
+	OKExMargin     *OKExMargin
+	OKExV3FutureWs *OKExV3FuturesWs
+	OKExV3SpotWs   *OKExV3SpotWs
 }
 
 func NewOKEx(config *APIConfig) *OKEx {
@@ -33,6 +36,8 @@ func NewOKEx(config *APIConfig) *OKEx {
 	okex.OKExWallet = &OKExWallet{okex}
 	okex.OKExMargin = &OKExMargin{okex}
 	okex.OKExSwap = &OKExSwap{okex, config}
+	okex.OKExV3FutureWs = NewOKExV3FuturesWs(okex)
+	okex.OKExV3SpotWs = NewOKExSpotV3Ws(okex)
 	return okex
 }
 
@@ -47,7 +52,7 @@ func (ok *OKEx) UUID() string {
 func (ok *OKEx) DoRequest(httpMethod, uri, reqBody string, response interface{}) error {
 	url := ok.config.Endpoint + uri
 	sign, timestamp := ok.doParamSign(httpMethod, uri, reqBody)
-	//log.Println(sign, timestamp)
+	logger.Log.Debug("timestamp=", timestamp, ", sign=", sign)
 	resp, err := NewHttpRequest(ok.config.HttpClient, httpMethod, url, reqBody, map[string]string{
 		CONTENT_TYPE: APPLICATION_JSON_UTF8,
 		ACCEPT:       APPLICATION_JSON,
@@ -60,7 +65,7 @@ func (ok *OKEx) DoRequest(httpMethod, uri, reqBody string, response interface{})
 		//log.Println(err)
 		return err
 	} else {
-		//	println(string(resp))
+		logger.Log.Debug(string(resp))
 		return json.Unmarshal(resp, &response)
 	}
 }

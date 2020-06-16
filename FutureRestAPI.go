@@ -35,8 +35,9 @@ type FutureRestAPI interface {
 
 	/**
 	 *全仓账户
+	 *@param currency
 	 */
-	GetFutureUserinfo() (*FutureAccount, error)
+	GetFutureUserinfo(currencyPair ...CurrencyPair) (*FutureAccount, error)
 
 	/**
 	 * @deprecated
@@ -49,6 +50,8 @@ type FutureRestAPI interface {
 	 * @param matchPrice  是否为对手价 0:不是    1:是   ,当取值为1时,price无效
 	 */
 	PlaceFutureOrder(currencyPair CurrencyPair, contractType, price, amount string, openType, matchPrice, leverRate int) (string, error)
+
+	LimitFuturesOrder(currencyPair CurrencyPair, contractType, price, amount string, openType int) (*FutureOrder, error)
 
 	/**
 	 * 取消订单

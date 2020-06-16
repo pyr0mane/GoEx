@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	. "github.com/nntaoli-project/GoEx"
+	"github.com/nntaoli-project/goex/internal/logger"
+	"net/http"
 	"net/url"
 	"sort"
 	"strings"
 	"time"
+
+	. "github.com/nntaoli-project/goex"
 )
 
 type Hbdm struct {
@@ -50,10 +53,75 @@ const (
 	defaultBaseUrl = "https://api.hbdm.com"
 )
 
+var (
+	FuturesContractInfos []FuturesContractInfo
+)
+
+func hbdmInit() {
+	go func() {
+		defer func() {
+			logger.Info("[hbdm] Get Futures Tick Size Finished.")
+		}()
+		interval := time.Second
+		intervalTimer := time.NewTimer(interval)
+
+		for {
+			select {
+			case <-intervalTimer.C:
+				var response struct {
+					Status string `json:"status"`
+					Data   []struct {
+						Symbol         string  `json:"symbol"`
+						ContractCode   string  `json:"contract_code"`
+						ContractType   string  `json:"contract_type"`
+						ContractSize   float64 `json:"contract_size"`
+						PriceTick      float64 `json:"price_tick"`
+						DeliveryDate   string  `json:"delivery_date"`
+						CreateDate     string  `json:"create_date"`
+						ContractStatus int     `json:"contract_status"`
+					} `json:"data"`
+				}
+				urlPath := "http://api.hbdm.pro/api/v1/contract_contract_info"
+				respBody, err := HttpGet5(http.DefaultClient, urlPath, map[string]string{})
+				if err != nil {
+					logger.Error("[hbdm] get contract info error=", err)
+					goto reset
+				}
+				err = json.Unmarshal(respBody, &response)
+				if err != nil {
+					logger.Errorf("[hbdm] json unmarshal contract info error=%s", err)
+					goto reset
+				}
+				FuturesContractInfos = FuturesContractInfos[:0]
+				for _, info := range response.Data {
+					FuturesContractInfos = append(FuturesContractInfos, FuturesContractInfo{
+						TickSize: &TickSize{
+							InstrumentID:    info.ContractCode,
+							UnderlyingIndex: info.Symbol,
+							QuoteCurrency:   "",
+							PriceTickSize:   info.PriceTick,
+							AmountTickSize:  0,
+						},
+						ContractVal:  info.ContractSize,
+						Delivery:     info.DeliveryDate,
+						ContractType: info.ContractType,
+					})
+				}
+				return
+			reset:
+				intervalTimer.Reset(10 * interval)
+			}
+
+		}
+
+	}()
+}
+
 func NewHbdm(conf *APIConfig) *Hbdm {
 	if conf.Endpoint == "" {
 		conf.Endpoint = defaultBaseUrl
 	}
+	hbdmInit()
 	return &Hbdm{conf}
 }
 
@@ -61,7 +129,7 @@ func (dm *Hbdm) GetExchangeName() string {
 	return HBDM
 }
 
-func (dm *Hbdm) GetFutureUserinfo() (*FutureAccount, error) {
+func (dm *Hbdm) GetFutureUserinfo(currencyPair ...CurrencyPair) (*FutureAccount, error) {
 	path := "/api/v1/contract_account_info"
 	var data []struct {
 		Symbol            string  `json:"symbol"`
@@ -130,10 +198,14 @@ func (dm *Hbdm) GetFuturePosition(currencyPair CurrencyPair, contractType string
 
 	var positions []FuturePosition
 	for _, d := range data {
+		if d.ContractType != contractType {
+			continue
+		}
+		
 		switch d.Direction {
 		case "buy":
 			positions = append(positions, FuturePosition{
-				ContractType:  contractType,
+				ContractType:  d.ContractType,
 				ContractId:    int64(ToInt(d.ContractCode[3:])),
 				Symbol:        currencyPair,
 				BuyAmount:     d.Volume,
@@ -144,7 +216,7 @@ func (dm *Hbdm) GetFuturePosition(currencyPair CurrencyPair, contractType string
 				LeverRate:     d.LeverRate})
 		case "sell":
 			positions = append(positions, FuturePosition{
-				ContractType:   contractType,
+				ContractType:   d.ContractType,
 				ContractId:     int64(ToInt(d.ContractCode[3:])),
 				Symbol:         currencyPair,
 				SellAmount:     d.Volume,
@@ -160,6 +232,11 @@ func (dm *Hbdm) GetFuturePosition(currencyPair CurrencyPair, contractType string
 }
 
 func (dm *Hbdm) PlaceFutureOrder(currencyPair CurrencyPair, contractType, price, amount string, openType, matchPrice, leverRate int) (string, error) {
+	fOrder, err := dm.PlaceFutureOrder2(currencyPair, contractType, price, amount, openType, matchPrice, leverRate)
+	return fOrder.OrderID2, err
+}
+
+func (dm *Hbdm) PlaceFutureOrder2(currencyPair CurrencyPair, contractType, price, amount string, openType, matchPrice, leverRate int) (*FutureOrder, error) {
 	var data struct {
 		OrderId  int64 `json:"order_id"`
 		COrderId int64 `json:"client_order_id"`
@@ -168,13 +245,19 @@ func (dm *Hbdm) PlaceFutureOrder(currencyPair CurrencyPair, contractType, price,
 	params := &url.Values{}
 	path := "/api/v1/contract_order"
 
+	params.Add("client_order_id", fmt.Sprint(time.Now().UnixNano()))
 	params.Add("contract_type", contractType)
 	params.Add("symbol", currencyPair.CurrencyA.Symbol)
-	params.Add("price", price)
 	params.Add("volume", amount)
 	params.Add("lever_rate", fmt.Sprint(leverRate))
-	params.Add("order_price_type", "limit")
 	params.Add("contract_code", "")
+
+	if matchPrice == 1 {
+		params.Set("order_price_type", "opponent") //对手价下单
+	} else {
+		params.Set("order_price_type", "limit")
+		params.Add("price", dm.formatPriceSize(contractType, currencyPair.CurrencyA, price))
+	}
 
 	direction, offset := dm.adaptOpenType(openType)
 	params.Add("offset", offset)
@@ -182,7 +265,26 @@ func (dm *Hbdm) PlaceFutureOrder(currencyPair CurrencyPair, contractType, price,
 
 	err := dm.doRequest(path, params, &data)
 
-	return fmt.Sprint(data.OrderId), err
+	fOrd := &FutureOrder{
+		ClientOid:    params.Get("client_order_id"),
+		ContractName: contractType,
+		Currency:     currencyPair,
+		Price:        ToFloat64(price),
+		Amount:       ToFloat64(amount),
+		OType:        openType,
+	}
+
+	if err != nil {
+		return fOrd, err
+	}
+
+	fOrd.OrderID2 = fmt.Sprint(data.OrderId)
+
+	return fOrd, err
+}
+
+func (dm *Hbdm) LimitFuturesOrder(currencyPair CurrencyPair, contractType, price, amount string, openType int) (*FutureOrder, error) {
+	return dm.PlaceFutureOrder2(currencyPair, contractType, price, amount, openType, 0, 10)
 }
 
 func (dm *Hbdm) FutureCancelOrder(currencyPair CurrencyPair, contractType, orderId string) (bool, error) {
@@ -301,13 +403,11 @@ func (dm *Hbdm) GetFutureOrders(orderIds []string, currencyPair CurrencyPair, co
 }
 
 func (dm *Hbdm) GetContractValue(currencyPair CurrencyPair) (float64, error) {
-	switch currencyPair {
-	case BTC_USD:
+	switch currencyPair.CurrencyA {
+	case BTC:
 		return 100, nil
-	case LTC_USD, ETH_USD, EOS_USD:
-		return 10, nil
 	default:
-		return 0, errors.New("error")
+		return 10, nil
 	}
 }
 
@@ -336,15 +436,20 @@ func (dm *Hbdm) GetFutureTicker(currencyPair CurrencyPair, contractType string) 
 		return nil, errors.New(ret["err_msg"].(string))
 	}
 
-	tick := ret["tick"].(map[string]interface{})
+	tick, ok1 := ret["tick"].(map[string]interface{})
+	ask, ok2 := tick["ask"].([]interface{})
+	bid, ok3 := tick["bid"].([]interface{})
+	if !ok1 || !ok2 || !ok3 {
+		return nil, errors.New("no tick data")
+	}
 	return &Ticker{
 		Pair: currencyPair,
 		Last: ToFloat64(tick["close"]),
 		Vol:  ToFloat64(tick["amount"]),
 		Low:  ToFloat64(tick["low"]),
 		High: ToFloat64(tick["high"]),
-		Sell: ToFloat64(tick["ask"].([]interface{})[0]),
-		Buy:  ToFloat64(tick["bid"].([]interface{})[0]),
+		Sell: ToFloat64(ask[0]),
+		Buy:  ToFloat64(bid[0]),
 		Date: ToUint64(ret["ts"])}, nil
 }
 
@@ -368,9 +473,13 @@ func (dm *Hbdm) GetFutureDepth(currencyPair CurrencyPair, contractType string, s
 	mills := ToUint64(ret["ts"])
 	dep.UTime = time.Unix(int64(mills/1000), int64(mills%1000)*int64(time.Millisecond))
 
-	tick := ret["tick"].(map[string]interface{})
-	asks := tick["asks"].([]interface{})
-	bids := tick["bids"].([]interface{})
+	tick, ok1 := ret["tick"].(map[string]interface{})
+	asks, ok2 := tick["asks"].([]interface{})
+	bids, ok3 := tick["bids"].([]interface{})
+
+	if !ok1 || !ok2 || !ok3 {
+		return nil, errors.New("data error")
+	}
 
 	for _, item := range asks {
 		askItem := item.([]interface{})
@@ -430,7 +539,8 @@ func (dm *Hbdm) GetKlineRecords(contract_type string, currency CurrencyPair, per
 	}
 
 	var klines []FutureKline
-	for _, d := range ret.Data {
+	for i := len(ret.Data) - 1; i >= 0; i-- {
+		d := ret.Data[i]
 		klines = append(klines, FutureKline{
 			Kline: &Kline{
 				Pair:      currency,
@@ -502,16 +612,16 @@ func (dm *Hbdm) adaptKLinePeriod(period int) string {
 	}
 }
 
-func (dm *Hbdm) adaptOpenType(openType int) (string, string) {
+func (dm *Hbdm) adaptOpenType(openType int) (direction string, offset string) {
 	switch openType {
 	case OPEN_BUY:
 		return "buy", "open"
 	case OPEN_SELL:
 		return "sell", "open"
 	case CLOSE_SELL:
-		return "sell", "close"
-	case CLOSE_BUY:
 		return "buy", "close"
+	case CLOSE_BUY:
+		return "sell", "close"
 	default:
 		return "", ""
 	}
@@ -521,9 +631,9 @@ func (dm *Hbdm) adaptOffsetDirectionToOpenType(offset, direction string) int {
 	switch offset {
 	case "close":
 		if direction == "buy" {
-			return CLOSE_BUY
-		} else {
 			return CLOSE_SELL
+		} else {
+			return CLOSE_BUY
 		}
 
 	default:
@@ -590,4 +700,23 @@ func (dm *Hbdm) doRequest(path string, params *url.Values, data interface{}) err
 	}
 
 	return json.Unmarshal(ret.Data, data)
+}
+
+func (dm *Hbdm) formatPriceSize(contract string, currency Currency, price string) string {
+	var tickSize = 2 //default set 2
+	for _, v := range FuturesContractInfos {
+		if (v.ContractType == contract || v.InstrumentID == contract) && v.UnderlyingIndex == currency.Symbol {
+			if v.PriceTickSize == 0 {
+				break
+			}
+			tickSize = 0
+			priceSize := v.PriceTickSize
+			for priceSize < 1 {
+				tickSize++
+				priceSize *= 10
+			}
+			break
+		}
+	}
+	return FloatToString(ToFloat64(price), tickSize)
 }

@@ -3,7 +3,8 @@ package okex
 import (
 	"fmt"
 	"github.com/go-openapi/errors"
-	. "github.com/nntaoli-project/GoEx"
+	. "github.com/nntaoli-project/goex"
+	"github.com/nntaoli-project/goex/internal/logger"
 	"sort"
 	"strings"
 	"time"
@@ -110,7 +111,7 @@ func (ok *OKExSpot) BatchPlaceOrders(orders []Order) ([]PlaceOrderResponse, erro
 func (ok *OKExSpot) PlaceOrder(ty string, ord *Order) (*Order, error) {
 	urlPath := "/api/spot/v3/orders"
 	param := PlaceOrderParam{
-		ClientOid:    ok.UUID(),
+		ClientOid:    GenerateOrderClientId(32),
 		InstrumentId: ord.Currency.AdaptUsdToUsdt().ToLower().ToSymbol("-"),
 	}
 
@@ -223,7 +224,7 @@ type OrderResponse struct {
 	InstrumentId   string  `json:"instrument_id"`
 	ClientOid      string  `json:"client_oid"`
 	OrderId        string  `json:"order_id"`
-	Price          float64 `json:"price,string"`
+	Price          string  `json:"price,omitempty"`
 	Size           float64 `json:"size,string"`
 	Notional       string  `json:"notional"`
 	Side           string  `json:"side"`
@@ -240,7 +241,7 @@ func (ok *OKExSpot) adaptOrder(response OrderResponse) *Order {
 	ordInfo := &Order{
 		Cid:        response.ClientOid,
 		OrderID2:   response.OrderId,
-		Price:      response.Price,
+		Price:      ToFloat64(response.Price),
 		Amount:     response.Size,
 		AvgPrice:   ToFloat64(response.PriceAvg),
 		DealAmount: ToFloat64(response.FilledSize),
@@ -266,7 +267,7 @@ func (ok *OKExSpot) adaptOrder(response OrderResponse) *Order {
 	date, err := time.Parse(time.RFC3339, response.Timestamp)
 	//log.Println(date.Local().UnixNano()/int64(time.Millisecond))
 	if err != nil {
-		println(err)
+		logger.Error("parse timestamp err=", err, ",timestamp=", response.Timestamp)
 	} else {
 		ordInfo.OrderTime = int(date.UnixNano() / int64(time.Millisecond))
 	}
@@ -312,24 +313,41 @@ func (ok *OKExSpot) GetUnfinishOrders(currency CurrencyPair) ([]Order, error) {
 }
 
 func (ok *OKExSpot) GetOrderHistorys(currency CurrencyPair, currentPage, pageSize int) ([]Order, error) {
-	panic("unsupported")
+	urlPath := fmt.Sprintf("/api/spot/v3/orders?instrument_id=%s&state=7", currency.AdaptUsdToUsdt().ToSymbol("-"))
+	var response []OrderResponse
+	err := ok.OKEx.DoRequest("GET", urlPath, "", &response)
+	if err != nil {
+		return nil, err
+	}
+
+	var orders []Order
+	for _, itm := range response {
+		ord := ok.adaptOrder(itm)
+		ord.Currency = currency
+		orders = append(orders, *ord)
+	}
+
+	return orders, nil
 }
 
 func (ok *OKExSpot) GetExchangeName() string {
 	return OKEX
 }
 
+type spotTickerResponse struct {
+	InstrumentId  string  `json:"instrument_id"`
+	Last          float64 `json:"last,string"`
+	High24h       float64 `json:"high_24h,string"`
+	Low24h        float64 `json:"low_24h,string"`
+	BestBid       float64 `json:"best_bid,string"`
+	BestAsk       float64 `json:"best_ask,string"`
+	BaseVolume24h float64 `json:"base_volume_24h,string"`
+	Timestamp     string  `json:"timestamp"`
+}
+
 func (ok *OKExSpot) GetTicker(currency CurrencyPair) (*Ticker, error) {
 	urlPath := fmt.Sprintf("/api/spot/v3/instruments/%s/ticker", currency.AdaptUsdToUsdt().ToSymbol("-"))
-	var response struct {
-		Last          float64 `json:"last,string"`
-		High24h       float64 `json:"high_24h,string"`
-		Low24h        float64 `json:"low_24h,string"`
-		BestBid       float64 `json:"best_bid,string"`
-		BestAsk       float64 `json:"best_ask,string"`
-		BaseVolume24h float64 `json:"base_volume_24_h,string"`
-		Timestamp     string  `json:"timestamp"`
-	}
+	var response spotTickerResponse
 	err := ok.OKEx.DoRequest("GET", urlPath, "", &response)
 	if err != nil {
 		return nil, err
@@ -447,5 +465,84 @@ func (ok *OKExSpot) GetKlineRecords(currency CurrencyPair, period, size, since i
 
 //非个人，整个交易所的交易记录
 func (ok *OKExSpot) GetTrades(currencyPair CurrencyPair, since int64) ([]Trade, error) {
-	panic("unsupported")
+	urlPath := fmt.Sprintf("/api/spot/v3/instruments/%s/trades?limit=%d", currencyPair.AdaptUsdToUsdt().ToSymbol("-"), since)
+
+	var response []struct {
+		Timestamp string  `json:"timestamp"`
+		TradeId   int64   `json:"trade_id,string"`
+		Price     float64 `json:"price,string"`
+		Size      float64 `json:"size,string"`
+		Side      string  `json:"side"`
+	}
+	err := ok.DoRequest("GET", urlPath, "", &response)
+	if err != nil {
+		return nil, err
+	}
+
+	var trades []Trade
+	for _, item := range response {
+		t, _ := time.Parse(time.RFC3339, item.Timestamp)
+		trades = append(trades, Trade{
+			Tid:    item.TradeId,
+			Type:   AdaptTradeSide(item.Side),
+			Amount: item.Size,
+			Price:  item.Price,
+			Date:   t.Unix(),
+			Pair:   currencyPair,
+		})
+	}
+
+	return trades, nil
+}
+
+type OKExSpotSymbol struct {
+	BaseCurrency    string
+	QuoteCurrency   string
+	PricePrecision  float64
+	AmountPrecision float64
+	MinAmount       float64
+	MinValue        float64
+	SymbolPartition string
+	Symbol          string
+}
+
+func (ok *OKExSpot) GetCurrenciesPrecision() ([]OKExSpotSymbol, error) {
+	var response []struct {
+		InstrumentId  string  `json:"instrument_id"`
+		BaseCurrency  string  `json:"base_currency"`
+		QuoteCurrency string  `json:"quote_currency"`
+		MinSize       float64 `json:"min_size,string"`
+		SizeIncrement string  `json:"size_increment"`
+		TickSize      string  `json:"tick_size"`
+	}
+	err := ok.DoRequest("GET", "/api/spot/v3/instruments", "", &response)
+	if err != nil {
+		return nil, err
+	}
+
+	var Symbols []OKExSpotSymbol
+	for _, v := range response {
+		var sym OKExSpotSymbol
+		sym.BaseCurrency = v.BaseCurrency
+		sym.QuoteCurrency = v.QuoteCurrency
+		sym.Symbol = v.InstrumentId
+		sym.MinAmount = v.MinSize
+
+		pres := strings.Split(v.TickSize, ".")
+		if len(pres) == 1 {
+			sym.PricePrecision = 0
+		} else {
+			sym.PricePrecision = float64(len(pres[1]))
+		}
+
+		pres = strings.Split(v.SizeIncrement, ".")
+		if len(pres) == 1 {
+			sym.AmountPrecision = 0
+		} else {
+			sym.AmountPrecision = float64(len(pres[1]))
+		}
+
+		Symbols = append(Symbols, sym)
+	}
+	return Symbols, nil
 }

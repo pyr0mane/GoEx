@@ -1,12 +1,17 @@
 package okex
 
 import (
-	"github.com/nntaoli-project/GoEx"
+	"github.com/nntaoli-project/goex"
+	"github.com/nntaoli-project/goex/internal/logger"
 	"github.com/stretchr/testify/assert"
 	"net/http"
 	"testing"
 	"time"
 )
+
+func init() {
+	logger.Log.SetLevel(logger.DEBUG)
+}
 
 //
 var config2 = &goex.APIConfig{
@@ -233,4 +238,8 @@ func TestOKExMargin_CancelOrder(t *testing.T) {
 
 func TestOKExMargin_GetOneOrder(t *testing.T) {
 	t.Log(okex.OKExMargin.GetOneOrder("3174778420532224", goex.EOS_USDT))
+}
+
+func TestOKExSpot_GetCurrenciesPrecision(t *testing.T) {
+	t.Log(okex.OKExSpot.GetCurrenciesPrecision())
 }
